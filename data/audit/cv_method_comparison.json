@@ -1,0 +1,51 @@
+{
+  "note": "m1113-g4 only; development-set numbers (parameters tuned on the same images); not held-out accuracy.",
+  "approach_1_avatar_matching_cross_domain": {
+    "hsv_hist": {
+      "top1_of_10_candidates": 5,
+      "hungarian_within_side_of_5": 8,
+      "n": 10
+    },
+    "sift_matches": {
+      "top1_of_10_candidates": 8,
+      "hungarian_within_side_of_5": 8,
+      "n": 10
+    },
+    "ncc_template": {
+      "top1_of_10_candidates": 4,
+      "hungarian_within_side_of_5": 5,
+      "n": 10
+    }
+  },
+  "approach_2_label_reading_real_frames_full_vocab": {
+    "m1113_720p_probe.jpg": {
+      "visible_labels": 7,
+      "read_correctly": 7,
+      "false_positives": 0,
+      "vocabulary": 96
+    },
+    "m1113_panel_reference.jpg": {
+      "visible_labels": 3,
+      "read_correctly": 3,
+      "false_positives": 0,
+      "vocabulary": 96
+    }
+  },
+  "approach_2_label_reading_480p_crops_closed_set": {
+    "correct": 8,
+    "n": 10,
+    "closed_set_size": 5,
+    "wrong": [
+      {
+        "truth": "kimmy",
+        "predicted": "masha",
+        "margin": 0.05
+      },
+      {
+        "truth": "suyou",
+        "predicted": "masha",
+        "margin": 0.0
+      }
+    ]
+  }
+}

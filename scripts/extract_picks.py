@@ -23,7 +23,7 @@ from pathlib import Path
 
 import cv2
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2] / "mpl-s18-draft-project"
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from pipeline_lib import PICK_TURN_ORDER  # noqa: E402

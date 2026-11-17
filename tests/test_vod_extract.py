@@ -29,7 +29,9 @@ from types import SimpleNamespace
 import cv2
 import numpy as np
 
-ROOT = Path(__file__).resolve().parent.parent
+EXTRACTOR_ROOT = Path(__file__).resolve().parents[1]
+ROOT = EXTRACTOR_ROOT.parent / "mpl-s18-draft-project"
+sys.path.insert(0, str(EXTRACTOR_ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from vod_extract import detect as D, geometry as G, labels as L, slots as SL, stream as S  # noqa: E402

@@ -1,4 +1,4 @@
-"""Slot-position-based chronological extraction.
+﻿"""Slot-position-based chronological extraction.
 
 The pick order is NOT inferred from when names appear. It is read from WHERE
 they appear: the draft bar fills its slots in turn order, outer edge first.
@@ -22,7 +22,9 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+EXTRACTOR_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_SCRIPTS = EXTRACTOR_ROOT.parent / "mpl-s18-draft-project" / "scripts"
+sys.path.insert(0, str(PROJECT_SCRIPTS))
 from pipeline_lib import PICK_TURN_ORDER  # noqa: E402
 
 from . import detect as D, geometry as G  # noqa: E402
@@ -223,3 +225,4 @@ def build_result(tracker: SlotTracker, cands, lane_order=None, turn_check=True):
                    "not_lane_order_artifact": not_lane, "turn_structure_consistent": turn_ok})
     passed = all(checks.values())
     return {"slots": slots, "order": order, "checks": checks, "issues": issues, "passed": passed}
+

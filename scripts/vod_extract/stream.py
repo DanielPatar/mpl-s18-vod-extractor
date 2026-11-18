@@ -44,7 +44,7 @@ def _net_opts(src: str) -> list[str]:
 
 def probe(src: str, run=subprocess.run) -> dict:
     cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0",
-           "-show_entries", "stream=width,height:format=duration", "-of", "json", src]
+           "-show_entries", "stream=width,height,bit_rate:format=duration,bit_rate", "-of", "json", src]
     if _is_url(src):
         cmd[1:1] = ["-rw_timeout", "20000000"]
     r = run(cmd, capture_output=True, text=True, timeout=60)
@@ -55,16 +55,22 @@ def probe(src: str, run=subprocess.run) -> dict:
     if not st.get("width"):
         raise StreamError("no video stream found")
     dur = j.get("format", {}).get("duration")
+    br = st.get("bit_rate") or j.get("format", {}).get("bit_rate")
     return {"width": int(st["width"]), "height": int(st["height"]),
-            "duration": float(dur) if dur not in (None, "N/A") else None}
+            "duration": float(dur) if dur not in (None, "N/A") else None,
+            "bit_rate": int(br) if br not in (None, "N/A") else None}
 
 
-def resolve_stream_url(video_url: str, min_height: int = 720, max_height: int = 1080,
+def resolve_stream_url(video_url: str, min_height: int = 720, max_height: int = 720,
                        run=subprocess.run) -> str:
     """Ask yt-dlp for a direct media URL WITHOUT downloading anything.
-    Opt-in only (see docs/VOD_EXTRACTOR.md). The URL is signed and expires, so
-    callers should be ready to call this again."""
-    fmt = f"bv*[height<=?{max_height}][height>={min_height}]/b[height<=?{max_height}][height>={min_height}]"
+
+    Prefers exactly 720p (labels were validated on a real 720p frame, and 720p
+    costs roughly half the bytes of 1080p); falls back to anything from
+    min_height up to 1080p. The URL is signed and expires: call again for a new one."""
+    h = max(max_height, 1080)
+    fmt = (f"bv*[height<={max_height}][height>={min_height}]"
+           f"/bv*[height<=?{h}][height>={min_height}]/b[height<=?{h}][height>={min_height}]")
     r = run(["yt-dlp", "-g", "--no-playlist", "-f", fmt, video_url],
             capture_output=True, text=True, timeout=120)
     lines = [x for x in (r.stdout or "").splitlines() if x.startswith("http")]
@@ -85,10 +91,10 @@ def _read_exact(f, n: int):
 
 def iter_strip_frames(src: str, start: float, end: float | None, fps: float,
                       resolver=None, max_retries: int = 3, popen=subprocess.Popen,
-                      probe_fn=probe):
+                      probe_fn=probe, info: dict | None = None):
     """Yield (t_seconds, canon) where canon is a 720x1280x3 BGR array whose rows
     540..699 hold the bar strip and everything else is zero."""
-    info = probe_fn(src)
+    info = info or probe_fn(src)
     if abs(info["width"] / info["height"] - 16 / 9) > 0.02:
         raise StreamError(f"video is {info['width']}x{info['height']}, not 16:9")
     if info["height"] < 720:
@@ -135,3 +141,12 @@ def iter_strip_frames(src: str, start: float, end: float | None, fps: float,
             raise StreamError(f"stream ended at {reached:.1f}s, expected {stop:.1f}s, after {max_retries} retries")
         if resolver is not None:
             src = resolver()
+
+
+def grab_frame(src: str, t: float, info: dict | None = None, popen=subprocess.Popen, probe_fn=probe):
+    """One (t, canon) frame at about t, or None past the end. Used by the draft search."""
+    it = iter_strip_frames(src, t, t + 1.0, 1.0, info=info, popen=popen, probe_fn=probe_fn, max_retries=0)
+    try:
+        return next(it, None)
+    finally:
+        it.close()

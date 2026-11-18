@@ -13,8 +13,8 @@ B = tim Red,  slot ke-n dihitung dari tepi luar panelnya (panel kanan: dari kana
 | | Status |
 |---|---|
 | Kode dibuat | `scripts/extract_picks.py`, `scripts/vod_extract/{geometry,slots,detect,labels,stream,video}.py`, `tests/test_vod_extract.py`, `scripts/eval_cv_approaches.py` |
-| Kode diuji | 82 tes lulus (22 lama proyek + 60 baru): frame asli, video sintetis, server HTTP lokal, ffmpeg palsu, logika murni. Dua mutasi sengaja (indeks slot Red diputar; urutan berdasarkan waktu) ditangkap tes. |
-| **Ekstraksi berhasil pada VOD sungguhan** | **Belum.** Lingkungan penyusun tidak bisa mengakses YouTube. Yang terbukti pada data asli hanyalah **dua frame statis** dari m1113-g4 (§4). |
+| Kode diuji | 75 tes lulus di repo extractor: frame asli, video sintetis, server HTTP lokal, ffmpeg palsu, logika murni. Dua mutasi sengaja (indeks slot Red diputar; urutan berdasarkan waktu) ditangkap tes. |
+| **Ekstraksi penuh berhasil pada VOD sungguhan** | **Belum.** Yang terbukti pada VOD asli: probe detik 330 (geometri valid, 7 dari 10 hero terbaca di slot yang benar), dan probe detik 420/600 (bukan layar draft, ditolak dengan benar). A4, A5, B5 belum pernah terbaca dari video. |
 
 ## 1. Arsitektur
 
@@ -111,3 +111,29 @@ Hasil yang diharapkan: `result: extracted`, event berurutan **Masha → Freya �
 - **Integrasi dataset:** hasil mesin sengaja tidak masuk ke `data/processed`/`data/annotations`. `apply_annotation` mensyaratkan konfirmasi manusia untuk `verified_by_vod`. Perlu keputusan status apa untuk hasil mesin agar engine boleh memakainya.
 - Batch ±210 VOD belum dibuat (menunggu satu VOD asli lolos).
 - Catatan lama `mpl_id_s18_m1113_g4_visual_labels.json` ("A5 sudah locked sebelum 05:30") berbeda dengan frame 05:30 (A5 = preview tanpa label); menunggu hasil nyata.
+
+## 7. Pencarian layar draft otomatis (tahap 2)
+
+Tidak ada timestamp tetap. Alurnya:
+
+1. **Cari.** Dari `--search-from` (default 0) sampai `--search-limit` (default 1200 dtk), langkah `--search-step` (15 dtk): satu frame per langkah. Frame dianggap layar draft bila kedua panel punya 5 pelat nama dan geometri slot yang masuk akal (uji yang sama dengan pembaca slot). Kandidat dikonfirmasi dengan **satu** peluncuran ffmpeg yang membaca t+2 dan t+4 (minimal 2 dari 3 frame valid). Gameplay, kartu judul, dan transisi gagal uji ini dan dilewati.
+2. **Baca.** Dense scan 2 fps mulai `found - search-step`.
+3. **Berhenti** karena: `all_confirmed` (10 slot terkonfirmasi + `--lookahead`), `layout_lost` (bar hilang ≥ `--loss-seconds`, default 25 dtk, sebelum lengkap), `end_of_window`, atau `draft_not_found`. Alasan tercatat di `diagnostics.stop_reason`; alasan tahap masuk `quarantine_reasons`: `draft_not_found`, `draft_layout_lost_before_complete`, `scan_window_exhausted`.
+
+Cakupan geometri (`geometry_unstable`) kini dihitung di dalam jendela draft saja. Sebelumnya dihitung terhadap semua frame sejak detik 0, sehingga draft yang sempurna dikarantina bila frame non-draft sebelumnya lebih banyak daripada frame draft (terbukti lewat eksperimen; ada tes regresinya).
+
+Bukti dari linimasa nyata m1113-g4 (`data/audit/m1113_full_vod_collage.jpg` di repo utama): bar draft tampak dari ±0:15 sampai ±6:45; ±7:00 kartu judul; gameplay ±8:00–22:15. Itu cocok dengan probe: 330 dtk valid, 420 dan 600 dtk tidak.
+
+### Biaya data (terukur pada server HTTP lokal, klip sintetis)
+
+| Tahap | Terukur |
+|---|---|
+| ffprobe | ±0,3–0,5 MB |
+| Tiap peluncuran ffmpeg (header + seek) | ±1,2 MB biaya tetap, berapa pun panjang yang dibaca |
+| Dense scan sampai detik 42 | ±2,0 MB (±0,5 MB di atas kebutuhan: read-ahead kecil) |
+
+Karena biaya tetap per peluncuran, konfirmasi kandidat digabung jadi satu peluncuran (sebelumnya tiga). Biaya per game nyata ≈ durasi jendela draft × bitrate stream; `provenance.stream_bitrate_bps` kini dicatat agar bisa dihitung dari data, bukan dari perkiraan. Format yt-dlp memilih 720p lebih dulu (1080p sebagai cadangan).
+
+### Path ke repo utama
+
+Terpusat di `scripts/vod_extract/paths.py`: folder saudara `mpl-s18-draft-project`, atau variabel lingkungan `MPL_PROJECT_ROOT`.

@@ -247,8 +247,10 @@ def _bounds(strip, kinds):
     return xs
 
 
-def _frame(t, plan, hide_names=(), hide_window=None):
+def _frame(t, plan, hide_names=(), hide_window=None, bar_windows=None):
     f = _bg().copy()
+    if bar_windows is not None and not any(a <= t <= b for a, b in bar_windows):
+        return f                                       # no draft bar on screen at all
     for strip in ("left", "right"):
         states = [plan.state(strip, k, t) for k in range(1, 6)]
         b = _bounds(strip, [s[0] for s in states])
@@ -332,7 +334,7 @@ class SyntheticSlotVideoTests(unittest.TestCase):
         rc = X.main(["--game-id", GAME, "--video", str(v), "--out", str(out)])
         res = json.loads(out.read_text())
         self.assertEqual(rc, 0)
-        self.assertTrue(res["diagnostics"]["stopped_early"])
+        self.assertEqual(res["diagnostics"]["stop_reason"], "all_confirmed")
         self.assertLess(res["diagnostics"]["frames_scanned"], 80 * 2)
         self.assertEqual([p.name for p in work.iterdir()], ["o.json"])
         self.assertEqual(res["storage"]["video_or_frame_files_written"], 0)
@@ -449,6 +451,42 @@ class SyntheticSlotVideoTests(unittest.TestCase):
         rc, res = self._run("lane", std_plan(heroes=lane))
         self.assertEqual(rc, 2)
         self.assertIn("suspicious_lane_order", _issue_codes(res))
+
+    # ---- finding the draft bar without a fixed timestamp ---------------------------
+    def test_auto_search_finds_the_draft_after_a_long_preroll(self):
+        late = {p: t + 100 for p, t in LOCK_T.items()}
+        rc, res = self._run("preroll", std_plan(lock_t=late), dur=150, base=(),
+                            video_kw={"bar_windows": [(95.0, 150.0)]})
+        self.assertEqual(rc, 0, res["issues"])
+        self.assertEqual(_events_heroes(res), EXPECTED_SEQUENCE)
+        ds = res["diagnostics"]["draft_search"]
+        self.assertEqual(ds["mode"], "auto")
+        self.assertTrue(90.0 <= ds["found_at_s"] <= 110.0, ds["found_at_s"])
+        self.assertLessEqual(len(ds["probes"]), 16)                    # coarse stage stayed coarse
+        self.assertEqual(res["diagnostics"]["stop_reason"], "all_confirmed")
+        self.assertLess(res["diagnostics"]["frames_scanned"], 120)     # did not scan the pre-roll densely
+
+    def test_video_without_any_draft_bar_is_reported_not_guessed(self):
+        rc, res = self._run("nodraft", std_plan(), dur=60, base=(), video_kw={"bar_windows": []})
+        self.assertEqual(rc, 2)
+        self.assertIsNone(res["events"])
+        self.assertIn("draft_not_found", res["quarantine_reasons"])
+        self.assertEqual(res["diagnostics"]["frames_scanned"], 0)
+        self.assertEqual(res["diagnostics"]["stop_reason"], "draft_not_found")
+
+    def test_bar_disappearing_before_completion_stops_with_a_specific_reason(self):
+        rc, res = self._run("lost", std_plan(), dur=140, base=(), video_kw={"bar_windows": [(0.0, 33.0)]})
+        self.assertEqual(rc, 2)
+        self.assertEqual(res["diagnostics"]["stop_reason"], "layout_lost")
+        self.assertIn("draft_layout_lost_before_complete", res["quarantine_reasons"])
+        self.assertIn(("slot_empty", "B5"), {(i["code"], i.get("position")) for i in res["issues"]})
+        self.assertLess(res["diagnostics"]["frames_scanned"], 70 * 2)  # did not run on through 140 s of non-draft video
+
+    def test_short_cutaway_over_the_bar_is_tolerated(self):
+        rc, res = self._run("cutaway", std_plan(), dur=60, base=(),
+                            video_kw={"bar_windows": [(0.0, 20.0), (27.0, 60.0)]})
+        self.assertEqual(rc, 0, res["issues"])
+        self.assertEqual(_events_heroes(res), EXPECTED_SEQUENCE)
 
     def test_series_or_livestream_vod_without_start_is_refused(self):
         v = self.tmp / "tiny.avi"
@@ -633,6 +671,33 @@ class BuildResultTests(unittest.TestCase):
         self.assertIn("suspicious_lane_order", self.codes(res))
         self.assertFalse(res["passed"])
 
+    def test_long_preroll_does_not_dilute_geometry_coverage(self):
+        # Regression: a perfect draft was quarantined as geometry_unstable once the
+        # non-draft frames scanned before it outnumbered the draft frames.
+        bad = SimpleNamespace(ok=False)
+        tr = SL.SlotTracker("blue")
+        for i in range(600):
+            tr.add_frame(i * 0.5, {"left": bad, "right": bad}, [])
+        base = len(tr.times)
+        for i in range(80):
+            items = []
+            for pos in POSITIONS:
+                if i >= FR[pos]:
+                    a = SL.slot_address(pos, "blue")
+                    items.append((a["strip"], a["strip_index"], _det(SLOT_HEROES[pos], a["side"])))
+            tr.add_frame((base + i) * 0.5, {"left": OK, "right": OK}, items)
+        res = SL.build_result(tr, CANDS, LANE)
+        self.assertNotIn("geometry_unstable", self.codes(res))
+        self.assertTrue(res["passed"], res["issues"])
+
+    def test_geometry_that_really_flickers_inside_the_window_is_still_unstable(self):
+        bad = SimpleNamespace(ok=False)
+        tr = SL.SlotTracker("blue")
+        for i in range(80):
+            g = OK if i % 4 == 0 else bad
+            tr.add_frame(i * 0.5, {"left": g, "right": g}, [])
+        self.assertIn("geometry_unstable", self.codes(SL.build_result(tr, CANDS, LANE)))
+
     def test_no_valid_geometry_anywhere_is_a_layout_failure(self):
         tr = SL.SlotTracker("blue")
         bad = SimpleNamespace(ok=False)
@@ -695,7 +760,7 @@ class StreamOverHttpTests(unittest.TestCase):
             raise unittest.SkipTest("no bold TrueType font available")
         cls.tmp = Path(tempfile.mkdtemp())
         avi = cls.tmp / "s.avi"
-        _write_video(avi, std_plan(), dur=150, fps=4)
+        _write_video(avi, std_plan(), dur=300, fps=4)
         cls.mp4 = cls.tmp / "s.mp4"
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(avi), "-c:v", "libx264", "-crf", "30",
                         "-g", "50", "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(cls.mp4)], check=True)
@@ -719,9 +784,9 @@ class StreamOverHttpTests(unittest.TestCase):
         self.assertEqual(rc, 0, res["issues"])
         self.assertEqual(_events_heroes(res), EXPECTED_SEQUENCE)
         self.assertEqual(res["provenance"]["source_kind"], "http_stream")
-        self.assertTrue(res["diagnostics"]["stopped_early"])
+        self.assertEqual(res["diagnostics"]["stop_reason"], "all_confirmed")
         self.assertEqual([p.name for p in work.iterdir()], ["o.json"])
-        self.assertLess(_RangeHandler.sent, 0.8 * self.size)
+        self.assertLess(_RangeHandler.sent, 0.6 * self.size)   # draft ends at ~13% of this clip
         print(f"\n   [http] served {_RangeHandler.sent} of {self.size} bytes")
 
     def test_seek_into_the_middle_keeps_only_the_bar_strip(self):
@@ -813,6 +878,105 @@ class StreamLogicTests(unittest.TestCase):
         run = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, stdout="", stderr="no 720p format")
         with self.assertRaises(S.StreamError):
             S.resolve_stream_url("https://youtu.be/ID", run=run)
+
+
+class DraftSearchTests(unittest.TestCase):
+    def _search(self, valid_times, **kw):
+        from unittest import mock
+        from vod_extract import search as SE
+        valid = set(valid_times)
+        calls = []
+
+        def sample(t):
+            calls.append(t)
+            return "DRAFT" if round(t, 1) in valid else "other"
+
+        with mock.patch.object(SE, "layout_present", side_effect=lambda f: f == "DRAFT"):
+            found, probes = SE.find_draft_start(sample, **kw)
+        return found, probes, calls
+
+    def test_first_confirmed_sample_is_returned(self):
+        v = {45.0, 47.0, 49.0, 60.0, 62.0, 64.0}
+        found, probes, _ = self._search(v, lo=0, hi=120, step=15)
+        self.assertEqual(found, 45.0)
+        self.assertEqual(probes[0], (0.0, False))
+
+    def test_a_single_stray_frame_is_not_a_draft(self):
+        found, _p, _c = self._search({30.0}, lo=0, hi=120, step=15)       # not confirmed 2 s / 4 s later
+        self.assertIsNone(found)
+
+    def test_two_of_three_samples_are_enough(self):
+        found, _p, _c = self._search({30.0, 34.0}, lo=0, hi=120, step=15)
+        self.assertEqual(found, 30.0)
+
+    def test_nothing_found_returns_none_with_the_audit_trail(self):
+        found, probes, calls = self._search(set(), lo=0, hi=60, step=15)
+        self.assertIsNone(found)
+        self.assertEqual([t for t, _ok in probes], [0.0, 15.0, 30.0, 45.0, 60.0])
+        self.assertEqual(len(calls), 5)                                   # coarse only: no dense probing
+
+    def test_confirmation_uses_one_burst_not_one_launch_per_frame(self):
+        from unittest import mock
+        from vod_extract import search as SE
+        sample_calls, burst_calls = [], []
+
+        def sample(t):
+            sample_calls.append(t)
+            return "DRAFT" if t >= 30 else "other"
+
+        def burst(t, gaps):
+            burst_calls.append((t, list(gaps)))
+            return ["DRAFT" for _ in gaps]
+
+        with mock.patch.object(SE, "layout_present", side_effect=lambda f: f == "DRAFT"):
+            found, probes = SE.find_draft_start(sample, 0, 120, 15, burst=burst)
+        self.assertEqual(found, 30.0)
+        self.assertEqual(sample_calls, [0, 15, 30])                       # one cheap look per coarse step
+        self.assertEqual(burst_calls, [(30, [2.0, 4.0])])                # ONE launch to confirm
+        self.assertEqual(probes[-2:], [(32.0, True), (34.0, True)])
+
+    def test_search_never_looks_past_hi(self):
+        _f, _p, calls = self._search(set(), lo=10, hi=40, step=15)
+        self.assertLessEqual(max(calls), 40.0)
+
+
+class SourceTests(unittest.TestCase):
+    def test_expired_url_is_re_resolved_once(self):
+        from vod_extract.source import Source
+        urls = iter(["http://old", "http://fresh"])
+        seen = []
+
+        def probe_fn(u):
+            seen.append(u)
+            if u == "http://old":
+                raise S.StreamError("403")
+            return {"width": 1280, "height": 720, "duration": 100.0}
+
+        src = Source(resolver=lambda: next(urls), probe_fn=probe_fn)
+        self.assertEqual(seen, ["http://old", "http://fresh"])
+        self.assertEqual(src.height, 720)
+        self.assertEqual(src.kind, "yt_dlp_stream")
+
+    def test_no_resolver_means_the_error_is_not_hidden(self):
+        from vod_extract.source import Source
+
+        def probe_fn(u):
+            raise S.StreamError("403")
+
+        with self.assertRaises(S.StreamError):
+            Source(video="http://x", probe_fn=probe_fn)
+
+    def test_yt_dlp_asks_for_720p_first(self):
+        seen = {}
+
+        def run(cmd, **kw):
+            seen["cmd"] = cmd
+            return subprocess.CompletedProcess(cmd, 0, stdout="https://rr1.example/v.mp4\n", stderr="")
+
+        S.resolve_stream_url("https://youtu.be/ID", run=run)
+        fmt = seen["cmd"][seen["cmd"].index("-f") + 1]
+        self.assertTrue(fmt.startswith("bv*[height<=720][height>=720]"), fmt)
+        self.assertIn("height<=?1080", fmt)                               # fallback to 1080p exists
 
 
 class RealFrameLabelTests(unittest.TestCase):

@@ -1,4 +1,4 @@
-﻿"""Slot-position-based chronological extraction.
+"""Slot-position-based chronological extraction.
 
 The pick order is NOT inferred from when names appear. It is read from WHERE
 they appear: the draft bar fills its slots in turn order, outer edge first.
@@ -22,9 +22,9 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
-EXTRACTOR_ROOT = Path(__file__).resolve().parents[2]
-PROJECT_SCRIPTS = EXTRACTOR_ROOT.parent / "mpl-s18-draft-project" / "scripts"
-sys.path.insert(0, str(PROJECT_SCRIPTS))
+from . import paths  # noqa: E402
+
+paths.ensure_project_scripts_on_path()
 from pipeline_lib import PICK_TURN_ORDER  # noqa: E402
 
 from . import detect as D, geometry as G  # noqa: E402
@@ -68,6 +68,8 @@ class SlotTracker:
         self.reads = defaultdict(list)      # (strip, idx) -> [(frame, t, hero|None, score, margin)]
         self.times = []
         self.geom_ok = Counter()
+        self.geom_first = {}                # strip -> first frame index with valid geometry
+        self.geom_last = {}                 # strip -> last frame index with valid geometry
         self.unassigned = Counter()
 
     def add_frame(self, t, geoms, items, unassigned=()):
@@ -76,6 +78,8 @@ class SlotTracker:
         for s, g in geoms.items():
             if g.ok:
                 self.geom_ok[s] += 1
+                self.geom_first.setdefault(s, i)
+                self.geom_last[s] = i
         for strip, idx, det in items:
             self.reads[(strip, idx)].append(
                 (i, t, None, 0.0, 0.0) if det is None else (i, t, det.hero, det.score, det.margin))
@@ -136,10 +140,15 @@ def build_result(tracker: SlotTracker, cands, lane_order=None, turn_check=True):
             issues.append({"code": "layout_not_validated", "strip": strip,
                            "detail": "no frame had a valid slot geometry (5 name plates + plausible fit); "
                                      "the layout may differ from the one this was measured on"})
-        elif ok / n_frames < 0.5:
+            continue
+        # Coverage is measured inside the draft window (first..last valid frame). Frames
+        # before the bar appears or after it is gone say nothing about geometry stability;
+        # counting them made a perfect draft fail after a long pre-show.
+        window = tracker.geom_last[strip] - tracker.geom_first[strip] + 1
+        if ok / window < 0.5:
             layout_ok = False
             issues.append({"code": "geometry_unstable", "strip": strip,
-                           "detail": f"valid geometry in only {ok}/{n_frames} frames"})
+                           "detail": f"valid geometry in only {ok}/{window} frames inside the draft window"})
 
     slots = {}
     for _side, _phase, pos in PICK_TURN_ORDER:

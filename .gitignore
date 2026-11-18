@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+debug/
+*.bak
+*.bak2
